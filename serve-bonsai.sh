@@ -8,9 +8,10 @@
 # and produces garbage. The image gate below is therefore not a convenience.
 #
 # Usage:
-#   serve-bonsai.sh [--profile max|duo256|trio256|duo128|quad128|penta128|hexa128|octo64|vision]
+#   serve-bonsai.sh [--profile max|duo256|trio256|trio200|duo128|quad128|penta128|hexa128|octo64|vision]
 #                   [--port N] [--host H] [--context N] [--parallel N]
-#                   [--estimate] [--dry-run] [--no-vram-check] [--list] [--help]
+#                   [--estimate] [--dry-run] [--min-headroom MiB]
+#                   [--no-vram-check] [--list] [--help]
 #                   [-- <extra llama-server args...>]
 #
 # Profiles (ternary weights ~5.95GB leave room for double the GGUF slots):
@@ -19,6 +20,7 @@
 #   trio256: 3 slots 256K ctx, q4_0 KV            (the 24GB ceiling: 4x256K
 #                                                  needs ~25.4 GiB, plus the
 #                                                  ~1.5 GiB the desktop holds)
+#   trio200: 3 slots 200K ctx, q4_0 KV            (3 slots with ~4 GiB free)
 #   duo128:  2 slots 128K ctx, q4_0 KV            (= gguf-duo128 parity)
 #   quad128: 4 slots 128K ctx, q4_0 KV            (= 2x gguf-duo128 quota)
 #   penta128:5 slots 128K ctx, q4_0 KV            (~19.5 GiB with mmproj)
@@ -44,15 +46,17 @@ mmproj_file=""
 
 usage() {
   cat <<USAGE
-usage: $(basename -- "$0") [--profile max|duo256|trio256|duo128|quad128|octo64|vision] [--port N]
+usage: $(basename -- "$0") [--profile max|duo256|trio256|trio200|duo128|quad128|penta128|hexa128|octo64|vision] [--port N]
        [--host H] [--context N] [--parallel N]
-       [--estimate] [--dry-run] [--no-vram-check] [--list] [--help]
+       [--estimate] [--dry-run] [--min-headroom MiB] [--no-vram-check]
+       [--list] [--help]
        [-- <extra llama-server args...>]
 
-  --profile max|duo256|trio256|duo128|quad128|penta128|hexa128|octo64|vision  preset (default: quad128)
+  --profile max|duo256|trio256|trio200|duo128|quad128|penta128|hexa128|octo64|vision  preset (default: quad128)
                             max:     1 slot,  262144 ctx, q4_0 KV
                             duo256:  2 slots, 262144 ctx, q4_0 KV
                             trio256: 3 slots, 262144 ctx, q4_0 KV
+                            trio200: 3 slots, 204800 ctx, q4_0 KV
                             duo128:  2 slots, 131072 ctx, q4_0 KV
                             quad128: 4 slots, 131072 ctx, q4_0 KV
                             penta128:5 slots, 131072 ctx, q4_0 KV
@@ -67,6 +71,8 @@ usage: $(basename -- "$0") [--profile max|duo256|trio256|duo128|quad128|octo64|v
                         off, or auto=off (router upgrades on first image)
   --estimate      print VRAM estimate for the resolved setup and exit 0
   --dry-run       print the docker command and exit 0
+  --min-headroom MiB  refuse to launch when it would leave less than MiB free
+                      (default: 2048, env NINFER_MIN_HEADROOM_MIB)
   --no-vram-check skip the VRAM pre-flight gate
   --list          list available .gguf files and exit 0
   -- <args...>    extra args appended to llama-server
@@ -86,6 +92,9 @@ mmproj_mode="auto"
 estimate_only=0
 dry_run=0
 vram_check=1
+# Hard floor on post-launch free VRAM. 2 GiB is the minimum that keeps a 24 GB
+# card out of trouble; set NINFER_MIN_HEADROOM_MIB=4096 to enforce the ideal.
+min_headroom="${NINFER_MIN_HEADROOM_MIB:-2048}"
 if [[ "${NINFER_NO_VRAM_CHECK:-0}" == "1" ]]; then vram_check=0; fi
 passthrough=()
 
@@ -106,6 +115,8 @@ while (( $# )); do
     --mmproj=*) mmproj_mode="${1#--mmproj=}"; shift ;;
     --estimate) estimate_only=1; shift ;;
     --dry-run) dry_run=1; shift ;;
+    --min-headroom) min_headroom="${2:?--min-headroom needs MiB}"; shift 2 ;;
+    --min-headroom=*) min_headroom="${1#--min-headroom=}"; shift ;;
     --no-vram-check) vram_check=0; shift ;;
     --list)
       shopt -s nullglob
@@ -141,6 +152,9 @@ case "$profile" in
   trio256)
     ctx=786432; slots=3; kv_type="q4_0"
     profile_label="3 slots, 262144 ctx each, q4_0 KV" ;;
+  trio200)
+    ctx=614400; slots=3; kv_type="q4_0"
+    profile_label="3 slots, 204800 ctx each, q4_0 KV" ;;
   duo128)
     ctx=262144; slots=2; kv_type="q4_0"
     profile_label="2 slots, 131072 ctx each, q4_0 KV" ;;
@@ -159,7 +173,7 @@ case "$profile" in
   vision)
     ctx=65536; slots=1; kv_type="q8_0"
     profile_label="1 slot + mmproj, 65536 ctx, q8_0 KV" ;;
-  *) printf 'Unknown --profile: %s (want max|duo256|trio256|duo128|quad128|penta128|hexa128|octo64|vision)\n' "$profile" >&2; exit 1 ;;
+  *) printf 'Unknown --profile: %s (want max|duo256|trio256|trio200|duo128|quad128|penta128|hexa128|octo64|vision)\n' "$profile" >&2; exit 1 ;;
 esac
 if [[ -n "$parallel_slots" ]]; then slots="$parallel_slots"; fi
 if [[ -n "$ctx_override" ]]; then ctx="$ctx_override"; fi
@@ -255,8 +269,18 @@ if [[ "$vram_check" == "1" ]]; then
         printf 'Free VRAM (another backend resident?) or set NINFER_NO_VRAM_CHECK=1.\n' >&2
         exit 3
       fi
-      if (( need_mib + 1024 > free_mib )); then
-        printf 'warning: <1 GiB headroom after launch\n' >&2
+      # Refuse setups that would leave the card with less than the reserve.
+      # The estimate is ~0.5-0.8 GiB above the measured footprint, so the
+      # real post-boot headroom is a little larger than free - need.
+      if (( need_mib + min_headroom > free_mib )); then
+        printf 'error: launch would leave %d MiB free, below the %d MiB reserve\n' \
+          "$((free_mib - need_mib))" "$min_headroom" >&2
+        printf 'Pick a smaller tier, lower NINFER_MIN_HEADROOM_MIB, or set NINFER_NO_VRAM_CHECK=1.\n' >&2
+        exit 3
+      fi
+      if (( need_mib + 4096 > free_mib )); then
+        printf 'warning: launch leaves ~%d MiB free (4 GiB ideal)\n' \
+          "$((free_mib - need_mib))" >&2
       fi
     else
       printf 'warning: nvidia-smi unreadable; skipping VRAM check\n' >&2

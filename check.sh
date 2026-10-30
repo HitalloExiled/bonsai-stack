@@ -34,6 +34,11 @@ if command -v docker >/dev/null 2>&1 && \
     "$root/serve-bonsai.sh" --profile trio256 --dry-run | grep -q -- '--parallel 3'
   NINFER_BONSAI_DIR="$tmp/gguf" NINFER_NO_VRAM_CHECK=1 \
     "$root/serve-bonsai.sh" --profile trio256 --dry-run | grep -q -- '-c 786432'
+  # trio200 keeps 3 slots with ~4 GiB of headroom.
+  NINFER_BONSAI_DIR="$tmp/gguf" NINFER_NO_VRAM_CHECK=1 \
+    "$root/serve-bonsai.sh" --profile trio200 --dry-run | grep -q -- '--parallel 3'
+  NINFER_BONSAI_DIR="$tmp/gguf" NINFER_NO_VRAM_CHECK=1 \
+    "$root/serve-bonsai.sh" --profile trio200 --dry-run | grep -q -- '-c 614400'
   # 128K ladder: 5 and 6 slots. hexa128 is the 128K ceiling.
   NINFER_BONSAI_DIR="$tmp/gguf" NINFER_NO_VRAM_CHECK=1 \
     "$root/serve-bonsai.sh" --profile penta128 --dry-run | grep -q -- '--parallel 5'
@@ -58,6 +63,27 @@ if command -v docker >/dev/null 2>&1 && \
   printf '%s' "$duo" | grep -q -- '-c 262144'
   NINFER_BONSAI_DIR="$tmp/gguf" NINFER_NO_VRAM_CHECK=1 \
     "$root/serve-bonsai.sh" --profile quad128 --dry-run | grep -q -- '-c 524288'
+  # The 2 GiB reserve gate, with a mocked nvidia-smi so it is deterministic.
+  # At 24,000 MiB free, trio256 + mmproj needs ~22.5 GiB and would leave
+  # ~1.4 GiB, so it must be refused (exit 3); trio200 + mmproj leaves ~4.4 GiB
+  # and must pass. The reserve stays overridable per launch.
+  mkdir -- "$tmp/bin"
+  cat > "$tmp/bin/nvidia-smi" <<'MOCK'
+#!/usr/bin/env bash
+printf '24000, 24564\n'
+MOCK
+  chmod +x "$tmp/bin/nvidia-smi"
+  rc=0
+  PATH="$tmp/bin:$PATH" NINFER_BONSAI_DIR="$tmp/gguf" \
+    "$root/serve-bonsai.sh" --profile trio256 --mmproj on --dry-run \
+    >/dev/null 2>&1 || rc=$?
+  [[ "$rc" == "3" ]]
+  PATH="$tmp/bin:$PATH" NINFER_BONSAI_DIR="$tmp/gguf" \
+    "$root/serve-bonsai.sh" --profile trio200 --mmproj on --dry-run | \
+    grep -q -- '--parallel 3'
+  PATH="$tmp/bin:$PATH" NINFER_BONSAI_DIR="$tmp/gguf" \
+    "$root/serve-bonsai.sh" --profile trio256 --mmproj on --min-headroom 1024 \
+    --dry-run 2>/dev/null | grep -q -- '--parallel 3'
   # A stock llama.cpp tag must be refused (exit 4), not launched.
   if docker image inspect ghcr.io/ggml-org/llama.cpp:server-cuda-b11854 >/dev/null 2>&1; then
     rc=0
