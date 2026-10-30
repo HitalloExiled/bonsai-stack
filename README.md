@@ -7,7 +7,7 @@ on an RTX 4090, via Docker. Companion to `gguf-stack` (stock llama.cpp) and
 
 - `serve-bonsai.sh` — profiles max/duo128/quad128/octo64/vision, VRAM pre-flight gate
 - `Dockerfile` — PrismML llama.cpp fork build (CUDA sm_89), labelled `org.prismml.ternary`
-- `PIN` — fork commit the image was built from
+- `llama.cpp/` — PrismML fork submodule, tagged `prism-b10831-9d9efea` (the gitlink is the pin)
 - `models/` — local `.gguf` artifacts (git-ignored)
 
 ## Why a separate stack
@@ -40,15 +40,34 @@ tok/s per stream at 4-way.
 ## Setup
 
 ```bash
-# 1. runtime image from the pinned fork
-git clone https://github.com/PrismML-Eng/llama.cpp /tmp/bonsai-llama.cpp
-git -C /tmp/bonsai-llama.cpp checkout "$(awk 'NR==1{print $3}' PIN)"
-docker build -f Dockerfile -t bonsai-llama-4090:sm89 /tmp/bonsai-llama.cpp
+# 1. runtime image, built from the pinned fork submodule (no network, no /tmp)
+git submodule update --init --recursive          # inside the model-router clone
+docker build -f Dockerfile \
+    --build-arg PRISM_TAG="$(git -C llama.cpp describe --tags --exact-match)" \
+    -t bonsai-llama-4090:sm89 .
 
 # 2. ternary weights (5.95 GB + 0.63 GB mmproj)
 hf download prism-ml/Ternary-Bonsai-2-27B-gguf \
     Ternary-Bonsai-2-27B-PTQ1_0.gguf \
     Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf --local-dir models
 ```
+
+## Runtime pin
+
+The submodule gitlink points at the PrismML release tag
+**`prism-b10831-9d9efea`** (2026-10-29, `9d9efea`), the newest `prism-b*`
+build. `git -C llama.cpp describe --tags --exact-match` prints it, and `--version`
+reports `commit 9d9efea`, so the running container can be traced back to the tag.
+
+The `stable` / `v0.0.1-prism` (2026-03-02) and `v0.0.2-prism` (2026-03-18) tags
+are older than the PTQ1_0 pack: `v0.0.2-prism` does not even contain
+`GGML_TYPE_PTQ1_0`, so it cannot load this model. The `prism-b*` tags are the
+actual release line.
+
+`llama.cpp/` is a submodule of this stack; **its gitlink is the pin**. Restore
+it with `git submodule update --init --recursive` and the image rebuilds from
+the exact same tree, offline. To move the pin, check out another `prism-b*`
+tag inside `llama.cpp`, rebuild, and commit the new gitlink — nothing else in
+this repo stores a commit.
 
 Run `./check.sh` to validate.

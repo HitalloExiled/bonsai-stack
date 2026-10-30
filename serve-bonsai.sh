@@ -27,8 +27,9 @@ export LC_ALL=C LC_NUMERIC=C
 
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 gguf_dir_default="$root/models"
-# Fork build, pinned by bonsai-stack/PIN. Never point this at a stock
-# ghcr.io/ggml-org image: it loads the legacy Q2_0 silently and returns garbage.
+# Fork build from the llama.cpp/ submodule (tag prism-b10831-9d9efea). Never
+# point this at a stock ghcr.io/ggml-org image: it loads the legacy Q2_0
+# silently and returns garbage.
 docker_image="${NINFER_BONSAI_IMAGE:-bonsai-llama-4090:sm89}"
 base_file="Ternary-Bonsai-2-27B-PTQ1_0.gguf"
 mmproj_file_name="Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf"

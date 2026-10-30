@@ -1,3 +1,6 @@
 models/
-build/
 *.gguf
+# Submodule metadata and the repo's own history never belong in the context.
+.git
+llama.cpp/.git
+build/
