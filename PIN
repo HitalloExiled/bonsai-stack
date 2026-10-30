@@ -1,0 +1,12 @@
+PrismML-Eng/llama.cpp @ 9d9efeadbdd1d77458d98717a96fbfa3a016e159
+date: 2026-10-29
+image: bonsai-llama-4090:sm89 (label org.prismml.ternary=true)
+
+Rebuild:
+  git clone https://github.com/PrismML-Eng/llama.cpp /tmp/bonsai-llama.cpp
+  git -C /tmp/bonsai-llama.cpp checkout 9d9efeadbdd1d77458d98717a96fbfa3a016e159
+  docker build -f Dockerfile --build-arg PRISM_COMMIT=9d9efea \
+       -t bonsai-llama-4090:sm89 /tmp/bonsai-llama.cpp
+
+Do not replace with a stock ghcr.io/ggml-org image: it loads legacy Q2_0
+silently and produces garbage instead of rejecting the file.
