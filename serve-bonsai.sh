@@ -8,7 +8,7 @@
 # and produces garbage. The image gate below is therefore not a convenience.
 #
 # Usage:
-#   serve-bonsai.sh [--profile max|duo256|trio256|duo128|quad128|octo64|vision]
+#   serve-bonsai.sh [--profile max|duo256|trio256|duo128|quad128|penta128|hexa128|octo64|vision]
 #                   [--port N] [--host H] [--context N] [--parallel N]
 #                   [--estimate] [--dry-run] [--no-vram-check] [--list] [--help]
 #                   [-- <extra llama-server args...>]
@@ -21,6 +21,9 @@
 #                                                  ~1.5 GiB the desktop holds)
 #   duo128:  2 slots 128K ctx, q4_0 KV            (= gguf-duo128 parity)
 #   quad128: 4 slots 128K ctx, q4_0 KV            (= 2x gguf-duo128 quota)
+#   penta128:5 slots 128K ctx, q4_0 KV            (~19.5 GiB with mmproj)
+#   hexa128: 6 slots 128K ctx, q4_0 KV            (128K ceiling: 7 would need
+#                                                  ~24.2 GiB + desktop)
 #   octo64:  8 slots  64K ctx, q4_0 KV            (= 2x gguf-quad quota)
 #   vision:  1 slot   64K ctx, q8_0 KV + mmproj
 #
@@ -46,12 +49,14 @@ usage: $(basename -- "$0") [--profile max|duo256|trio256|duo128|quad128|octo64|v
        [--estimate] [--dry-run] [--no-vram-check] [--list] [--help]
        [-- <extra llama-server args...>]
 
-  --profile max|duo256|trio256|duo128|quad128|octo64|vision  preset (default: quad128)
+  --profile max|duo256|trio256|duo128|quad128|penta128|hexa128|octo64|vision  preset (default: quad128)
                             max:     1 slot,  262144 ctx, q4_0 KV
                             duo256:  2 slots, 262144 ctx, q4_0 KV
                             trio256: 3 slots, 262144 ctx, q4_0 KV
                             duo128:  2 slots, 131072 ctx, q4_0 KV
                             quad128: 4 slots, 131072 ctx, q4_0 KV
+                            penta128:5 slots, 131072 ctx, q4_0 KV
+                            hexa128: 6 slots, 131072 ctx, q4_0 KV
                             octo64:  8 slots,  65536 ctx, q4_0 KV
                             vision:  1 slot,   65536 ctx, q8_0 KV + mmproj
   --port N        listen port (default: 18091)
@@ -142,13 +147,19 @@ case "$profile" in
   quad128)
     ctx=524288; slots=4; kv_type="q4_0"
     profile_label="4 slots, 131072 ctx each, q4_0 KV" ;;
+  penta128)
+    ctx=655360; slots=5; kv_type="q4_0"
+    profile_label="5 slots, 131072 ctx each, q4_0 KV" ;;
+  hexa128)
+    ctx=786432; slots=6; kv_type="q4_0"
+    profile_label="6 slots, 131072 ctx each, q4_0 KV" ;;
   octo64)
     ctx=524288; slots=8; kv_type="q4_0"
     profile_label="8 slots, 65536 ctx each, q4_0 KV" ;;
   vision)
     ctx=65536; slots=1; kv_type="q8_0"
     profile_label="1 slot + mmproj, 65536 ctx, q8_0 KV" ;;
-  *) printf 'Unknown --profile: %s (want max|duo256|trio256|duo128|quad128|octo64|vision)\n' "$profile" >&2; exit 1 ;;
+  *) printf 'Unknown --profile: %s (want max|duo256|trio256|duo128|quad128|penta128|hexa128|octo64|vision)\n' "$profile" >&2; exit 1 ;;
 esac
 if [[ -n "$parallel_slots" ]]; then slots="$parallel_slots"; fi
 if [[ -n "$ctx_override" ]]; then ctx="$ctx_override"; fi

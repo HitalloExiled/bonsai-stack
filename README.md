@@ -5,7 +5,7 @@
 on an RTX 4090, via Docker. Companion to `gguf-stack` (stock llama.cpp) and
 `ninfer-stack`.
 
-- `serve-bonsai.sh` — profiles max/duo256/trio256/duo128/quad128/octo64/vision, VRAM pre-flight gate
+- `serve-bonsai.sh` — profiles max/duo256/trio256/duo128/quad128/penta128/hexa128/octo64/vision, VRAM pre-flight gate
 - `Dockerfile` — PrismML llama.cpp fork build (CUDA sm_89), labelled `org.prismml.ternary`
 - `llama.cpp/` — PrismML fork submodule, tagged `prism-b10831-9d9efea` (the gitlink is the pin)
 - `models/` — local `.gguf` artifacts (git-ignored)
@@ -26,9 +26,11 @@ slot quota doubles at the same 24 GB card budget:
 |---|---|---|---|---|---|---|
 | `max` | 1 | 262144 | 256K | q4_0 | ~11.6 GiB | 12.2 GiB (+mmproj) |
 | `duo256` | 2 | 262144 | 512K | q4_0 | ~16.2 GiB | — |
-| `trio256` | 3 | 262144 | 768K | q4_0 | ~20.9 GiB | — |
+| `trio256` | 3 | 262144 | 768K | q4_0 | ~20.9 GiB | 21.0 GiB (+mmproj) |
 | `duo128` | 2 | 131072 | 256K | q4_0 | ~11.7 GiB | — |
 | `quad128` | 4 | 131072 | 512K | q4_0 | ~16.5 GiB | 16.5 GiB |
+| `penta128` | 5 | 131072 | 640K | q4_0 | ~19.4 GiB | 18.8 GiB (+mmproj) |
+| `hexa128` | 6 | 131072 | 768K | q4_0 | ~21.2 GiB | 21.2 GiB (+mmproj) |
 | `octo64` | 8 | 65536 | 512K | q4_0 | ~17.0 GiB | 17.0 GiB |
 | `vision` | 1 | 65536 | 64K + mmproj | q8_0 | ~9.8 GiB | — |
 
@@ -45,19 +47,37 @@ The `qwen35` backbone is hybrid: only 16 of 64 layers carry attention KV
 the 28 MiB/1k of a dense 27B. That is why the ternary tiers can hold more than
 the GGUF stack at the same quality.
 
-With ~5.95 GiB of weights and ~1.6 GiB of CUDA/workspace:
+Measured container footprint (booted alone, `nvidia-smi` after healthy):
+
+| profile | slots × ctx | total ctx | container | GPU free |
+|---|---|---|---|---|
+| `max` + mmproj | 1 × 256K | 256K | 12.2 GiB | ~10.8 GiB |
+| `penta128` + mmproj | 5 × 128K | 640K | 18.8 GiB | ~3.6 GiB |
+| `trio256` + mmproj | 3 × 256K | 768K | 21.0 GiB | ~1.3 GiB |
+| `hexa128` + mmproj | 6 × 128K | 768K | 21.2 GiB | ~1.1 GiB |
+
+The frontier at full windows:
 
 | slots × ctx | KV | total | fits 24.5 GiB |
 |---|---|---|---|
-| 2 × 256K | 9.0 GiB | 16.2 GiB | yes, ~7 GiB spare |
-| **3 × 256K** | **13.5 GiB** | **20.9 GiB** | **yes, ~2.5 GiB spare** |
-| 4 × 256K | 18.0 GiB | 25.4 GiB | no |
+| 2 × 256K | 9.0 GiB | ~16.3 GiB | yes, ~6 GiB spare |
+| **3 × 256K** | **13.5 GiB** | **~21.0 GiB** | **yes, ~1.3 GiB spare** |
+| 4 × 256K | 18.0 GiB | ~25.6 GiB | no |
+| 5 × 128K | 11.3 GiB | 18.8 GiB | yes, ~3.6 GiB spare |
+| **6 × 128K** | **13.5 GiB** | **21.2 GiB** | **yes, ~1.1 GiB spare** |
+| 7 × 128K | 15.8 GiB | ~23.6 GiB | no (with the desktop) |
 
-`trio256` is therefore the ceiling: three concurrent full-256K sessions. A
-fourth 256K slot would need ~25.4 GiB of VRAM before the ~1.5 GiB the desktop
-already holds, i.e. more than the 24,564 MiB card. Keeping the full window
-matters for agent sessions around 200K tokens: 4 × 192K would cost the same
-memory as 3 × 256K but reject those prompts.
+`trio256` and `hexa128` are the two ceilings, for different window needs:
+three concurrent 256K sessions, or six concurrent 128K sessions, both at
+~21 GiB. A fourth 256K slot needs ~25.6 GiB before the ~1.5-1.8 GiB the
+desktop already holds; a seventh 128K slot needs ~23.6 GiB + desktop.
+
+`hexa128` was stress-tested with six simultaneous 8K-token prefills: peak
+23,601 MiB (963 MiB free), no errors — it fits, but the margin is thin. Keep
+`penta128` (3.6 GiB free) if the desktop may need VRAM. Keeping the full
+window matters for agent sessions around 200K tokens: 4 × 192K would cost the
+same memory as 3 × 256K but reject those prompts, and a 200K request always
+forces a switch away from any 128K tier (the router checks this).
 
 Prefill is not a Bonsai penalty: 3.2k tok/s at an 11.4k-token prompt on
 `quad128`, against 3.1k tok/s for the Qwen3.8 27B IQ3_S GGUF on the same card.

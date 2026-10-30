@@ -34,11 +34,24 @@ if command -v docker >/dev/null 2>&1 && \
     "$root/serve-bonsai.sh" --profile trio256 --dry-run | grep -q -- '--parallel 3'
   NINFER_BONSAI_DIR="$tmp/gguf" NINFER_NO_VRAM_CHECK=1 \
     "$root/serve-bonsai.sh" --profile trio256 --dry-run | grep -q -- '-c 786432'
-  # trio256 must fit the 24 GB card even with the mmproj encoder resident.
+  # 128K ladder: 5 and 6 slots. hexa128 is the 128K ceiling.
+  NINFER_BONSAI_DIR="$tmp/gguf" NINFER_NO_VRAM_CHECK=1 \
+    "$root/serve-bonsai.sh" --profile penta128 --dry-run | grep -q -- '--parallel 5'
+  NINFER_BONSAI_DIR="$tmp/gguf" NINFER_NO_VRAM_CHECK=1 \
+    "$root/serve-bonsai.sh" --profile penta128 --dry-run | grep -q -- '-c 655360'
+  NINFER_BONSAI_DIR="$tmp/gguf" NINFER_NO_VRAM_CHECK=1 \
+    "$root/serve-bonsai.sh" --profile hexa128 --dry-run | grep -q -- '--parallel 6'
+  NINFER_BONSAI_DIR="$tmp/gguf" NINFER_NO_VRAM_CHECK=1 \
+    "$root/serve-bonsai.sh" --profile hexa128 --dry-run | grep -q -- '-c 786432'
+  # trio256 and hexa128 must fit the 24 GB card with the mmproj resident.
   trio_mib="$(NINFER_BONSAI_DIR="$tmp/gguf" NINFER_NO_VRAM_CHECK=1 \
     "$root/serve-bonsai.sh" --profile trio256 --mmproj on --estimate | \
     sed -n 's/.*= ~\([0-9]*\) MiB.*/\1/p')"
   [[ -n "$trio_mib" ]] && (( trio_mib < 24000 ))
+  hexa_mib="$(NINFER_BONSAI_DIR="$tmp/gguf" NINFER_NO_VRAM_CHECK=1 \
+    "$root/serve-bonsai.sh" --profile hexa128 --mmproj on --estimate | \
+    sed -n 's/.*= ~\([0-9]*\) MiB.*/\1/p')"
+  [[ -n "$hexa_mib" ]] && (( hexa_mib < 24000 ))
   # Doubled quota: quad128 must carry twice the total context of duo128.
   duo="$(NINFER_BONSAI_DIR="$tmp/gguf" NINFER_NO_VRAM_CHECK=1 \
     "$root/serve-bonsai.sh" --profile duo128 --dry-run)"
