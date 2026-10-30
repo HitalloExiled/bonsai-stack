@@ -8,13 +8,17 @@
 # and produces garbage. The image gate below is therefore not a convenience.
 #
 # Usage:
-#   serve-bonsai.sh [--profile max|duo128|quad128|octo64|vision] [--port N]
-#                   [--host H] [--context N] [--parallel N]
+#   serve-bonsai.sh [--profile max|duo256|trio256|duo128|quad128|octo64|vision]
+#                   [--port N] [--host H] [--context N] [--parallel N]
 #                   [--estimate] [--dry-run] [--no-vram-check] [--list] [--help]
 #                   [-- <extra llama-server args...>]
 #
 # Profiles (ternary weights ~5.95GB leave room for double the GGUF slots):
 #   max:     1 slot  262K ctx, q4_0 KV
+#   duo256:  2 slots 256K ctx, q4_0 KV            (two full-window sessions)
+#   trio256: 3 slots 256K ctx, q4_0 KV            (the 24GB ceiling: 4x256K
+#                                                  needs ~25.4 GiB, plus the
+#                                                  ~1.5 GiB the desktop holds)
 #   duo128:  2 slots 128K ctx, q4_0 KV            (= gguf-duo128 parity)
 #   quad128: 4 slots 128K ctx, q4_0 KV            (= 2x gguf-duo128 quota)
 #   octo64:  8 slots  64K ctx, q4_0 KV            (= 2x gguf-quad quota)
@@ -37,13 +41,15 @@ mmproj_file=""
 
 usage() {
   cat <<USAGE
-usage: $(basename -- "$0") [--profile max|duo128|quad128|octo64|vision] [--port N]
+usage: $(basename -- "$0") [--profile max|duo256|trio256|duo128|quad128|octo64|vision] [--port N]
        [--host H] [--context N] [--parallel N]
        [--estimate] [--dry-run] [--no-vram-check] [--list] [--help]
        [-- <extra llama-server args...>]
 
-  --profile max|duo128|quad128|octo64|vision  preset (default: quad128)
+  --profile max|duo256|trio256|duo128|quad128|octo64|vision  preset (default: quad128)
                             max:     1 slot,  262144 ctx, q4_0 KV
+                            duo256:  2 slots, 262144 ctx, q4_0 KV
+                            trio256: 3 slots, 262144 ctx, q4_0 KV
                             duo128:  2 slots, 131072 ctx, q4_0 KV
                             quad128: 4 slots, 131072 ctx, q4_0 KV
                             octo64:  8 slots,  65536 ctx, q4_0 KV
@@ -124,6 +130,12 @@ case "$profile" in
   max)
     ctx=262144; slots=1; kv_type="q4_0"
     profile_label="1 slot, 262144 total ctx, q4_0 KV" ;;
+  duo256)
+    ctx=524288; slots=2; kv_type="q4_0"
+    profile_label="2 slots, 262144 ctx each, q4_0 KV" ;;
+  trio256)
+    ctx=786432; slots=3; kv_type="q4_0"
+    profile_label="3 slots, 262144 ctx each, q4_0 KV" ;;
   duo128)
     ctx=262144; slots=2; kv_type="q4_0"
     profile_label="2 slots, 131072 ctx each, q4_0 KV" ;;
@@ -136,7 +148,7 @@ case "$profile" in
   vision)
     ctx=65536; slots=1; kv_type="q8_0"
     profile_label="1 slot + mmproj, 65536 ctx, q8_0 KV" ;;
-  *) printf 'Unknown --profile: %s (want max|duo128|quad128|octo64|vision)\n' "$profile" >&2; exit 1 ;;
+  *) printf 'Unknown --profile: %s (want max|duo256|trio256|duo128|quad128|octo64|vision)\n' "$profile" >&2; exit 1 ;;
 esac
 if [[ -n "$parallel_slots" ]]; then slots="$parallel_slots"; fi
 if [[ -n "$ctx_override" ]]; then ctx="$ctx_override"; fi
@@ -166,20 +178,26 @@ if [[ -n "$mmproj_file" && ! -f "$mmproj_file" ]]; then
 fi
 
 # Per-token KV estimate (MiB per 1024 tokens) by llama cache type.
-# q4_0 calibrated 2026-10-15 from a 256K boot on RTX 4090 (true ~25, +margin);
-# q8_0 conservative until measured.
+# Calibrated 2026-10-30 against this GGUF on the RTX 4090: the qwen35
+# backbone is hybrid, KV only exists on 16 of 64 layers
+# (full_attention_interval=4), 4 KV heads x 256 dims -> 18 MiB/1k at q4_0.
+# Measured: 1x256K + mmproj = 12,222 MiB; 4x128K = 16.5 GiB; 8x64K = 17.0 GiB.
+# The old 28/96 numbers overestimated by ~55% and would have wrongly rejected
+# the 3x256K profile in the VRAM gate.
 kv_mib_per_1k() {
   case "$1" in
-    q8_0) printf '96' ;;
-    q4_0) printf '28' ;;
-    *) printf '96' ;;
+    q8_0) printf '34' ;;
+    q4_0) printf '18' ;;
+    *) printf '34' ;;
   esac
 }
 
-# required_mib <file> <total_ctx> <kv_type> [extra_weights] -> "total|weights|kv".
+# required_mib <file> <total_ctx> <kv_type> [extra_weights] [slots] -> "total|weights|kv".
 # ctx is the TOTAL pool: slots split it, so KV cost is per token, not per slot.
+# Each extra slot adds ~128 MiB of recurrent (SSM) state, measured from the
+# quad128/octo64 delta (512 MiB across four extra slots).
 required_mib() {
-  local f="$1" cap="$2" dtype="$3" extra="${4:-}"
+  local f="$1" cap="$2" dtype="$3" extra="${4:-}" nslots="${5:-1}"
   local bytes per_1k kv_mib weights_mib overhead total
   bytes="$(stat -c%s -- "$f" 2>/dev/null || wc -c < "$f" | tr -d ' ')"
   if [[ -n "$extra" ]]; then
@@ -189,18 +207,20 @@ required_mib() {
   kv_mib="$(awk -v c="$cap" -v k="$per_1k" \
     'BEGIN { printf "%d", (c / 1024) * k }')"
   weights_mib="$(awk -v b="$bytes" 'BEGIN { printf "%d", (b / 1048576) * 0.99 }')"
-  overhead=1536  # CUDA graphs/workspace/slack; recalibrate from boot logs
+  # CUDA context/workspace/graphs (~1.3 GiB) plus per-slot SSM state.
+  overhead=$((1536 + nslots * 128))
   total=$((weights_mib + kv_mib + overhead))
   printf '%d|%d|%d' "$total" "$weights_mib" "$kv_mib"
 }
 
-estimate="$(required_mib "$gguf_dir/$base_file" "$ctx" "$kv_type" "$mmproj_file")"
+estimate="$(required_mib "$gguf_dir/$base_file" "$ctx" "$kv_type" "$mmproj_file" "$slots")"
 need_mib="${estimate%%|*}"; rest="${estimate#*|}"
 weights_mib="${rest%%|*}"; kv_mib="${rest##*|}"
 
 if [[ "$estimate_only" == "1" ]]; then
-  printf 'Estimate: weights ~%d MiB + kv ~%d MiB (%s %s tokens) + overhead 1536 MiB = ~%d MiB (%.1f GiB)\n' \
-    "$weights_mib" "$kv_mib" "$ctx" "$kv_type" "$need_mib" \
+  overhead_mib=$((need_mib - weights_mib - kv_mib))
+  printf 'Estimate: weights ~%d MiB + kv ~%d MiB (%s %s tokens) + overhead %d MiB = ~%d MiB (%.1f GiB)\n' \
+    "$weights_mib" "$kv_mib" "$ctx" "$kv_type" "$overhead_mib" "$need_mib" \
     "$(awk -v m="$need_mib" 'BEGIN { printf "%.1f", m / 1024 }')"
   exit 0
 fi
@@ -211,8 +231,9 @@ if [[ "$vram_check" == "1" ]]; then
     read -r free_mib total_mib <<< "$(nvidia-smi --query-gpu=memory.free,memory.total \
       --format=csv,noheader,nounits | head -1 | tr -d ' ' | tr ',' ' ' || true)"
     if [[ -n "${free_mib:-}" && -n "${total_mib:-}" ]]; then
-      printf 'VRAM: free %d MiB / total %d MiB; need ~%d MiB (weights ~%d + kv ~%d + overhead 1536)\n' \
-        "$free_mib" "$total_mib" "$need_mib" "$weights_mib" "$kv_mib"
+      printf 'VRAM: free %d MiB / total %d MiB; need ~%d MiB (weights ~%d + kv ~%d + slots/overhead %d)\n' \
+        "$free_mib" "$total_mib" "$need_mib" "$weights_mib" "$kv_mib" \
+        "$((need_mib - weights_mib - kv_mib))"
       if (( need_mib > total_mib )); then
         printf 'error: setup needs more than total VRAM\n' >&2
         exit 3

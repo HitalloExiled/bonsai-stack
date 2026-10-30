@@ -5,7 +5,7 @@
 on an RTX 4090, via Docker. Companion to `gguf-stack` (stock llama.cpp) and
 `ninfer-stack`.
 
-- `serve-bonsai.sh` — profiles max/duo128/quad128/octo64/vision, VRAM pre-flight gate
+- `serve-bonsai.sh` — profiles max/duo256/trio256/duo128/quad128/octo64/vision, VRAM pre-flight gate
 - `Dockerfile` — PrismML llama.cpp fork build (CUDA sm_89), labelled `org.prismml.ternary`
 - `llama.cpp/` — PrismML fork submodule, tagged `prism-b10831-9d9efea` (the gitlink is the pin)
 - `models/` — local `.gguf` artifacts (git-ignored)
@@ -24,17 +24,40 @@ slot quota doubles at the same 24 GB card budget:
 
 | profile | slots | ctx/slot | total ctx | KV | est. VRAM | measured |
 |---|---|---|---|---|---|---|
-| `max` | 1 | 262144 | 256K | q4_0 | ~14.0 GiB | — |
-| `duo128` | 2 | 131072 | 256K | q4_0 | ~14.0 GiB | — |
-| `quad128` | 4 | 131072 | 512K | q4_0 | ~21.0 GiB | 16.5 GiB |
-| `octo64` | 8 | 65536 | 512K | q4_0 | ~21.0 GiB | 17.0 GiB |
-| `vision` | 1 | 65536 | 64K + mmproj | q8_0 | ~9.4 GiB | — |
+| `max` | 1 | 262144 | 256K | q4_0 | ~11.6 GiB | 12.2 GiB (+mmproj) |
+| `duo256` | 2 | 262144 | 512K | q4_0 | ~16.2 GiB | — |
+| `trio256` | 3 | 262144 | 768K | q4_0 | ~20.9 GiB | — |
+| `duo128` | 2 | 131072 | 256K | q4_0 | ~11.7 GiB | — |
+| `quad128` | 4 | 131072 | 512K | q4_0 | ~16.5 GiB | 16.5 GiB |
+| `octo64` | 8 | 65536 | 512K | q4_0 | ~17.0 GiB | 17.0 GiB |
+| `vision` | 1 | 65536 | 64K + mmproj | q8_0 | ~9.8 GiB | — |
 
 `quad128` is 2x the `gguf-duo128` quota; `octo64` is 2x the `gguf-quad` quota.
-Measured on the RTX 4090 (`nvidia-smi` after boot): the launcher estimate is a
-conservative upper bound. Concurrency verified with
+Measured on the RTX 4090 (`nvidia-smi` after boot): the launcher estimate is
+within ~1% of the real footprint. Concurrency verified with
 `scripts/parallel-probe.py`: 4/4 and 8/8 slots busy simultaneously, ~68-83
 tok/s per stream at 4-way.
+
+### Maximum parallelism on the 24 GB card
+
+The `qwen35` backbone is hybrid: only 16 of 64 layers carry attention KV
+(`full_attention_interval=4`), so a q4_0 token costs **18 MiB/1k** rather than
+the 28 MiB/1k of a dense 27B. That is why the ternary tiers can hold more than
+the GGUF stack at the same quality.
+
+With ~5.95 GiB of weights and ~1.6 GiB of CUDA/workspace:
+
+| slots × ctx | KV | total | fits 24.5 GiB |
+|---|---|---|---|
+| 2 × 256K | 9.0 GiB | 16.2 GiB | yes, ~7 GiB spare |
+| **3 × 256K** | **13.5 GiB** | **20.9 GiB** | **yes, ~2.5 GiB spare** |
+| 4 × 256K | 18.0 GiB | 25.4 GiB | no |
+
+`trio256` is therefore the ceiling: three concurrent full-256K sessions. A
+fourth 256K slot would need ~25.4 GiB of VRAM before the ~1.5 GiB the desktop
+already holds, i.e. more than the 24,564 MiB card. Keeping the full window
+matters for agent sessions around 200K tokens: 4 × 192K would cost the same
+memory as 3 × 256K but reject those prompts.
 
 Prefill is not a Bonsai penalty: 3.2k tok/s at an 11.4k-token prompt on
 `quad128`, against 3.1k tok/s for the Qwen3.8 27B IQ3_S GGUF on the same card.
