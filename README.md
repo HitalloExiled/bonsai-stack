@@ -36,6 +36,12 @@ conservative upper bound. Concurrency verified with
 `scripts/parallel-probe.py`: 4/4 and 8/8 slots busy simultaneously, ~68-83
 tok/s per stream at 4-way.
 
+Prefill is not a Bonsai penalty: 3.2k tok/s at an 11.4k-token prompt on
+`quad128`, against 3.1k tok/s for the Qwen3.8 27B IQ3_S GGUF on the same card.
+Small prompts look slower only because of the fixed ~100 ms first-batch cost
+(~850 tok/s at 91 tokens), which the GGUF stack pays identically. Slot count
+does not change prefill (`max` 3.2k vs `quad128` 3.2k).
+
 
 ## Setup
 
