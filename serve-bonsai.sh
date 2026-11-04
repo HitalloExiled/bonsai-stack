@@ -77,6 +77,12 @@ usage: $(basename -- "$0") [--profile max|duo256|trio256|trio200|duo128|quad128|
   --list          list available .gguf files and exit 0
   -- <args...>    extra args appended to llama-server
 
+Env:
+  NINFER_BONSAI_IMAGE   image tag (default: bonsai-llama-4090:sm89)
+  NINFER_BONSAI_DIR     model dir (default: <stack>/models)
+  NINFER_SLOT_CACHE_DIR host dir bound to /slot-cache for slot save/restore
+                        (default: <stack>/slot-cache)
+
 Ternary g128 weights: {-1,0,+1} per 128 weights, one FP16 scale. Deployed
 size 5.95GB at 1.75 bits/weight, 98.2% of the FP16 benchmark average.
 KV per-token is q4_0 ~28MiB/1k (same hybrid-attention backbone as Qwen3.8).
@@ -131,6 +137,13 @@ while (( $# )); do
 done
 
 gguf_dir="${NINFER_BONSAI_DIR:-$gguf_dir_default}"
+# Slot cache: the router saves warm slots here before stopping the backend and
+# restores them after the next boot (same weights file only). Bound to the
+# container so `--slot-save-path` has a writable directory; the router is the
+# only client of the slot API and never proxies it. The Bonsai image must be
+# built from prism-b12128+ (checkpoint appendix in the slot file).
+slot_dir="${NINFER_SLOT_CACHE_DIR:-$root/slot-cache}"
+mkdir -p "$slot_dir"
 # Multimodal is lazy: the mmproj encoder (+0.63GB resident) loads only for the
 # vision profile or an explicit --mmproj on. The router upgrades a running
 # text tier in place on the first image request instead.
@@ -298,6 +311,7 @@ args=(
   --cache-type-k "$kv_type" --cache-type-v "$kv_type"
   -fa on --jinja
   --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.05
+  --slot-save-path /slot-cache
   --host 0.0.0.0 --port "$port"
 )
 if [[ -n "$mmproj_file" ]]; then
@@ -313,8 +327,8 @@ if (( ${#passthrough[@]} )); then
 fi
 
 if [[ "$dry_run" == "1" ]]; then
-  printf 'docker run --gpus all --rm -p %s:%s -v %s:/models:ro %s' \
-    "$port" "$port" "$gguf_dir" "$docker_image"
+  printf 'docker run --gpus all --rm -p 127.0.0.1:%s:%s -v %s:/models:ro -v %s:/slot-cache %s' \
+    "$port" "$port" "$gguf_dir" "$slot_dir" "$docker_image"
   printf ' %q' "${args[@]}"
   printf '\n'
   exit 0
@@ -322,5 +336,8 @@ fi
 
 printf 'Starting llama-server Bonsai 2 27B ternary (%s) at http://%s:%s/v1\n' \
   "$profile_label" "$host" "$port"
-exec docker run --gpus all --rm --init -p "$port:$port" \
-  -v "$gguf_dir:/models:ro" "$docker_image" "${args[@]}"
+# Loopback publish: the slot API writes files and must not be reachable from
+# the LAN; the router is local.
+exec docker run --gpus all --rm --init -p "127.0.0.1:$port:$port" \
+  -v "$gguf_dir:/models:ro" -v "$slot_dir:/slot-cache" \
+  "$docker_image" "${args[@]}"
