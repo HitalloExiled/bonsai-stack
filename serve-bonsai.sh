@@ -310,6 +310,9 @@ args=(
   -ngl 99 -c "$ctx" --parallel "$slots"
   --cache-type-k "$kv_type" --cache-type-v "$kv_type"
   -fa on --jinja
+  # Keep thinking in `reasoning_content` (the tested agent profile uses this;
+  # `auto` can leave the thought inline for some templates).
+  --reasoning-format deepseek
   --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.05
   --slot-save-path /slot-cache
   --host 0.0.0.0 --port "$port"
