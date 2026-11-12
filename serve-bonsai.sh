@@ -32,6 +32,7 @@
 # Exit codes: 0 ok, 1 usage, 2 missing image/model, 3 insufficient VRAM,
 #             4 wrong runtime (stock llama.cpp image).
 set -euo pipefail
+
 export LC_ALL=C LC_NUMERIC=C
 
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -39,7 +40,7 @@ gguf_dir_default="$root/models"
 # Fork build from the llama.cpp/ submodule (tag prism-b10831-9d9efea). Never
 # point this at a stock ghcr.io/ggml-org image: it loads the legacy Q2_0
 # silently and returns garbage.
-docker_image="${NINFER_BONSAI_IMAGE:-bonsai-llama-4090:sm89}"
+docker_image="${MODEL_ROUTER_BONSAI_IMAGE:-bonsai-llama-4090:sm89}"
 base_file="Ternary-Bonsai-2-27B-PTQ1_0.gguf"
 mmproj_file_name="Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf"
 mmproj_file=""
@@ -72,15 +73,15 @@ usage: $(basename -- "$0") [--profile max|duo256|trio256|trio200|duo128|quad128|
   --estimate      print VRAM estimate for the resolved setup and exit 0
   --dry-run       print the docker command and exit 0
   --min-headroom MiB  refuse to launch when it would leave less than MiB free
-                      (default: 2048, env NINFER_MIN_HEADROOM_MIB)
+                      (default: 2048, env MODEL_ROUTER_MIN_HEADROOM_MIB)
   --no-vram-check skip the VRAM pre-flight gate
   --list          list available .gguf files and exit 0
   -- <args...>    extra args appended to llama-server
 
 Env:
-  NINFER_BONSAI_IMAGE   image tag (default: bonsai-llama-4090:sm89)
-  NINFER_BONSAI_DIR     model dir (default: <stack>/models)
-  NINFER_SLOT_CACHE_DIR host dir bound to /slot-cache for slot save/restore
+  MODEL_ROUTER_BONSAI_IMAGE   image tag (default: bonsai-llama-4090:sm89)
+  MODEL_ROUTER_BONSAI_DIR     model dir (default: <stack>/models)
+  MODEL_ROUTER_SLOT_CACHE_DIR host dir bound to /slot-cache for slot save/restore
                         (default: <stack>/slot-cache)
 
 Ternary g128 weights: {-1,0,+1} per 128 weights, one FP16 scale. Deployed
@@ -90,7 +91,7 @@ USAGE
 }
 
 profile="quad128"
-port="${NINFER_BONSAI_PORT:-18091}"
+port="${MODEL_ROUTER_BONSAI_PORT:-18091}"
 host="127.0.0.1"
 ctx_override=""
 parallel_slots=""
@@ -99,9 +100,9 @@ estimate_only=0
 dry_run=0
 vram_check=1
 # Hard floor on post-launch free VRAM. 2 GiB is the minimum that keeps a 24 GB
-# card out of trouble; set NINFER_MIN_HEADROOM_MIB=4096 to enforce the ideal.
-min_headroom="${NINFER_MIN_HEADROOM_MIB:-2048}"
-if [[ "${NINFER_NO_VRAM_CHECK:-0}" == "1" ]]; then vram_check=0; fi
+# card out of trouble; set MODEL_ROUTER_MIN_HEADROOM_MIB=4096 to enforce the ideal.
+min_headroom="${MODEL_ROUTER_MIN_HEADROOM_MIB:-2048}"
+if [[ "${MODEL_ROUTER_NO_VRAM_CHECK:-0}" == "1" ]]; then vram_check=0; fi
 passthrough=()
 
 while (( $# )); do
@@ -126,7 +127,7 @@ while (( $# )); do
     --no-vram-check) vram_check=0; shift ;;
     --list)
       shopt -s nullglob
-      for f in "${NINFER_BONSAI_DIR:-$gguf_dir_default}"/*.gguf; do
+      for f in "${MODEL_ROUTER_BONSAI_DIR:-$gguf_dir_default}"/*.gguf; do
         printf '%s\n' "$(basename -- "$f")"
       done
       exit 0 ;;
@@ -136,13 +137,13 @@ while (( $# )); do
   esac
 done
 
-gguf_dir="${NINFER_BONSAI_DIR:-$gguf_dir_default}"
+gguf_dir="${MODEL_ROUTER_BONSAI_DIR:-$gguf_dir_default}"
 # Slot cache: the router saves warm slots here before stopping the backend and
 # restores them after the next boot (same weights file only). Bound to the
 # container so `--slot-save-path` has a writable directory; the router is the
 # only client of the slot API and never proxies it. The Bonsai image must be
 # built from prism-b12128+ (checkpoint appendix in the slot file).
-slot_dir="${NINFER_SLOT_CACHE_DIR:-$root/slot-cache}"
+slot_dir="${MODEL_ROUTER_SLOT_CACHE_DIR:-$root/slot-cache}"
 mkdir -p "$slot_dir"
 # Multimodal is lazy: the mmproj encoder (+0.63GB resident) loads only for the
 # vision profile or an explicit --mmproj on. The router upgrades a running
@@ -279,7 +280,7 @@ if [[ "$vram_check" == "1" ]]; then
       if (( need_mib > free_mib )); then
         printf 'error: insufficient free VRAM: %d MiB free, ~%d MiB required\n' \
           "$free_mib" "$need_mib" >&2
-        printf 'Free VRAM (another backend resident?) or set NINFER_NO_VRAM_CHECK=1.\n' >&2
+        printf 'Free VRAM (another backend resident?) or set MODEL_ROUTER_NO_VRAM_CHECK=1.\n' >&2
         exit 3
       fi
       # Refuse setups that would leave the card with less than the reserve.
@@ -288,7 +289,7 @@ if [[ "$vram_check" == "1" ]]; then
       if (( need_mib + min_headroom > free_mib )); then
         printf 'error: launch would leave %d MiB free, below the %d MiB reserve\n' \
           "$((free_mib - need_mib))" "$min_headroom" >&2
-        printf 'Pick a smaller tier, lower NINFER_MIN_HEADROOM_MIB, or set NINFER_NO_VRAM_CHECK=1.\n' >&2
+        printf 'Pick a smaller tier, lower MODEL_ROUTER_MIN_HEADROOM_MIB, or set MODEL_ROUTER_NO_VRAM_CHECK=1.\n' >&2
         exit 3
       fi
       if (( need_mib + 4096 > free_mib )); then
